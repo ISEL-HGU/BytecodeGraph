@@ -26,16 +26,16 @@ import java.util.*;
 /**
  * Builds WALA IR/CFG and projects dependence results to bytecode offsets.
  * DFG: SSA DefUse (flow)
- * DDP: FULL (flow + anti + output) via PDG
- * CDP: formal control dependence via post-dominators (Ferrante 1987)
+ * DDG: FULL (flow + anti + output) via PDG
+ * CDG: formal control dependence via post-dominators (Ferrante 1987)
  */
 public class WalaIRProjector {
 
     /** result container */
     public static class Flow {
         public final Map<Integer, Set<Integer>> dfg = new LinkedHashMap<>();
-        public final Map<Integer, Set<Integer>> ddp = new LinkedHashMap<>();
-        public final Map<Integer, Set<Integer>> cdp = new LinkedHashMap<>();
+        public final Map<Integer, Set<Integer>> ddg = new LinkedHashMap<>();
+        public final Map<Integer, Set<Integer>> cdg = new LinkedHashMap<>();
     }
 
     /** simple pair of target class & method */
@@ -72,12 +72,12 @@ public class WalaIRProjector {
         // 6) DFG (flow dependence via SSA DefUse)
         computeDFG(ir, irIndexToOffset, flow);
 
-        // 7) DDP (FULL: flow + anti + output) via PDG
+        // 7) DDG (FULL: flow + anti + output) via PDG
         ClassHierarchy cha = ClassHierarchyFactory.make(scope);
-        computeDDP(scope, cha, target.method, ir, irIndexToOffset, flow);
+        computeDDG(scope, cha, target.method, ir, irIndexToOffset, flow);
 
-        // 8) CDP (formal, post-dominator based)
-        computeCDP(ir, ssaCfg, irIndexToOffset, flow);
+        // 8) CDG (formal, post-dominator based)
+        computeCDG(ir, ssaCfg, irIndexToOffset, flow);
 
         return flow;
     }
@@ -202,8 +202,8 @@ public class WalaIRProjector {
     private void initFlow(BcelBytecodeCFG.Graph instrCFG, Flow flow) {
         for (Integer off : instrCFG.nodes.keySet()) {
             flow.dfg.putIfAbsent(off, new LinkedHashSet<>());
-            flow.ddp.putIfAbsent(off, new LinkedHashSet<>());
-            flow.cdp.putIfAbsent(off, new LinkedHashSet<>());
+            flow.ddg.putIfAbsent(off, new LinkedHashSet<>());
+            flow.cdg.putIfAbsent(off, new LinkedHashSet<>());
         }
     }
 
@@ -235,11 +235,11 @@ public class WalaIRProjector {
 
 
     /**
-     * Formal DDP (flow + anti + output) using WALA PDG.
+     * Formal DDG (flow + anti + output) using WALA PDG.
      * Builds a simple Zero-CFA CallGraph & PointerAnalysis, then constructs an intraprocedural PDG
      * and projects DATA dependences to bytecode offsets.
      */
-    private void computeDDP(AnalysisScope scope,
+    private void computeDDG(AnalysisScope scope,
                             ClassHierarchy cha,
                             IMethod targetMethod,
                             IR ir,
@@ -296,7 +296,7 @@ public class WalaIRProjector {
                 Integer srcOff = statementToOffset(s, irIndexToOffset);
                 Integer dstOff = statementToOffset(t, irIndexToOffset);
                 if (srcOff != null && dstOff != null) {
-                    flow.ddp.computeIfAbsent(srcOff, k -> new LinkedHashSet<>()).add(dstOff);
+                    flow.ddg.computeIfAbsent(srcOff, k -> new LinkedHashSet<>()).add(dstOff);
                 }
             }
         }
@@ -314,23 +314,35 @@ public class WalaIRProjector {
 
     /** Helper: map PDG Statement → IR index → bytecode offset. */
     private Integer statementToOffset(Statement st, Map<Integer, Integer> irIndexToOffset) {
+        // 1) normal statement instruction (if, add, putfield, etc)
         if (st instanceof NormalStatement ns) {
             SSAInstruction instr = ns.getInstruction();
             if (instr != null) return irIndexToOffset.get(instr.iIndex());
         }
-        return null; // expand for PARAM_/RETURN_/HEAP_ statements if desired
+        // 2) argument passing when method call (at INVOKE)
+        else if (st instanceof ParamCaller pc) {
+            SSAInstruction instr = pc.getInstruction();
+            if (instr != null) return irIndexToOffset.get(instr.iIndex());
+        }
+        // 3) receive result after method call (at INVOKE)
+        else if (st instanceof NormalReturnCaller rc) {
+            SSAInstruction instr = rc.getInstruction();
+            if (instr != null) return irIndexToOffset.get(instr.iIndex());
+        }
+
+        return null;
     }
 
 
     /* =========================
-     *  FORMAL CDP via post-dominators (Ferrante 1987)
-     *  method name kept short: computCDP(...)
+     *  FORMAL CDG via post-dominators (Ferrante 1987)
+     *  method name kept short: computeCDG(...)
      * ========================= */
 
-    private void computeCDP(IR ir,
-                           SSACFG ssaCfg,
-                           Map<Integer, Integer> irIndexToOffset,
-                           Flow flow) {
+    private void computeCDG(IR ir,
+                            SSACFG ssaCfg,
+                            Map<Integer, Integer> irIndexToOffset,
+                            Flow flow) {
 
         // collect blocks + index
         List<ISSABasicBlock> blocks = new ArrayList<>();
@@ -423,7 +435,7 @@ public class WalaIRProjector {
 
                     if (xSrcOff != null) {
                         for (Integer yDstOff : yOffsets) {
-                            flow.cdp.computeIfAbsent(xSrcOff, k -> new LinkedHashSet<>()).add(yDstOff);
+                            flow.cdg.computeIfAbsent(xSrcOff, k -> new LinkedHashSet<>()).add(yDstOff);
                         }
                     }
                 }

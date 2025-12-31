@@ -80,7 +80,7 @@ public class Main {
                     BcelBytecodeCFG.Graph instrCFG =
                             bcel.build(classFile.toString(), ms.name, ms.desc);
 
-                    // WALA: DFG/CDP/DDP (IR↔bytecode 매핑)
+                    // WALA: DFG/CDG/DDG (IR ↔ bytecode 매핑)
                     WalaIRProjector.Flow flow =
                             projector.analyze(appClassPath, internalClassName, ms.name, ms.desc, instrCFG);
 
@@ -106,8 +106,8 @@ public class Main {
                     edges.set("cfg", pairs(om, instrCFG.cfgEdges));
                     edges.set("ex",  pairs(om, instrCFG.exEdges));
                     edges.set("dfg", pairs(om, flow.dfg));
-                    edges.set("cdp", pairs(om, flow.cdp));
-                    edges.set("ddp", pairs(om, flow.ddp));
+                    edges.set("cdg", pairs(om, flow.cdg));
+                    edges.set("ddg", pairs(om, flow.ddg));
                     mnode.set("edges", edges);
 
                     methodsArr.add(mnode);
