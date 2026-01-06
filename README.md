@@ -26,7 +26,10 @@
 
 run-bytegraph.bat "<분석 대상 경로>" "<jdk 8 경로>"
 
-*  입력 권장 사항: 단일 파일 입력 시 클래스 로딩 오류(Target class not found)가 발생할 수 있으므로, 패키지 구조를 포함하는 **최상위 폴더(루트 디렉토리)**를 입력하는 것을 강력히 권장합니다.
+#### 실행 예시 (Mac/Linux 환경)
+
+run-bytegraph.sh "<분석 대상 경로>" "<jdk 8 경로>"
+
 
 ## 5. 출력 데이터 구조 (Output Format)
 
