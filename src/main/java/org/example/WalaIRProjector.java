@@ -6,9 +6,12 @@ import com.ibm.wala.classLoader.IClass;
 import com.ibm.wala.classLoader.IMethod;
 import com.ibm.wala.ipa.callgraph.*;
 import com.ibm.wala.ipa.callgraph.propagation.InstanceKey;
+import com.ibm.wala.ipa.callgraph.propagation.PointerKey;
 import com.ibm.wala.ipa.slicer.*;
 import com.ibm.wala.ssa.*;
 import com.ibm.wala.types.TypeReference;
+import com.ibm.wala.util.intset.OrdinalSet;
+
 import java.util.*;
 
 /**
@@ -56,14 +59,16 @@ public class WalaIRProjector {
         IR ir = session.cache.getIRFactory().makeIR(targetMethod, com.ibm.wala.ipa.callgraph.impl.Everywhere.EVERYWHERE, SSAOptions.defaultOptions());
         Flow flow = new Flow();
         initFlow(instrCFG, flow);
-
+        System.out.println("analyze start");
         // BCEL에서 추출된 물리적 DFG 엣지들을 최종 결과에 병합
         instrCFG.dfgEdges.forEach((src, dsts) -> flow.dfg.get(src).addAll(dsts));
 
         // 3) DFG/DDG/CDG 생성
         Map<Integer, Integer> irIndexToOffset = buildIRIndexToOffset(ir);
         buildDFG(ir, irIndexToOffset, flow);
+
         buildDDG(session, targetMethod, ir, irIndexToOffset, flow);
+
         buildCDG(ir, ir.getControlFlowGraph(), irIndexToOffset, flow);
 
         flow.dfg.forEach((src, dsts) -> {
@@ -100,15 +105,27 @@ public class WalaIRProjector {
      * and projects DATA dependences to bytecode offsets.
      */
     private void buildDDG(WalaSession session, IMethod targetMethod, IR ir, Map<Integer, Integer> irIndexToOffset, Flow flow) throws Exception {
+
+        // 1. 현재 분석 대상 노드 찾기
         CGNode node = null;
         for (CGNode n : session.cg) {
             if (n.getMethod().equals(targetMethod)) { node = n; break; }
         }
         if (node == null) return;
 
-        // session에 캐싱된 mod/ref/modRef를 즉시 사용
-        PDG<InstanceKey> pdg = new PDG<>(node, session.pa, session.mod, session.ref,
-                Slicer.DataDependenceOptions.NO_EXCEPTIONS, Slicer.ControlDependenceOptions.NONE,
+        // 2. 현재 노드에 대한 Mod/Ref 계산
+        if (session.modCache == null || session.modCache.isEmpty()) {
+            System.out.println(">>> Computing Global ModRef Map (First time only)...");
+            session.modCache = session.modRef.computeMod(session.cg, session.pa);
+            session.refCache = session.modRef.computeRef(session.cg, session.pa);
+        }
+
+        // 4. PDG 생성
+        PDG<InstanceKey> pdg = new PDG<>(node, session.pa,
+                session.modCache,
+                session.refCache,
+                Slicer.DataDependenceOptions.NO_EXCEPTIONS,
+                Slicer.ControlDependenceOptions.NONE,
                 null, session.cg, session.modRef);
 
         for (Statement s : pdg) {

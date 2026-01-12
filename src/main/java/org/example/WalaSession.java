@@ -14,6 +14,7 @@ import com.ibm.wala.util.MonitorUtil;
 import com.ibm.wala.util.intset.OrdinalSet;
 
 import java.io.File;
+import java.util.HashMap;
 import java.util.Map;
 
 public class WalaSession {
@@ -23,21 +24,30 @@ public class WalaSession {
     public final AnalysisCache cache;
     public final CallGraph cg;
     public final PointerAnalysis<InstanceKey> pa;
-    public final ModRef modRef;
-    public final Map<CGNode, OrdinalSet<PointerKey>> mod;
-    public final Map<CGNode, OrdinalSet<PointerKey>> ref;
+    public final com.ibm.wala.ipa.modref.ModRef<com.ibm.wala.ipa.callgraph.propagation.InstanceKey> modRef;
+    public Map<CGNode, OrdinalSet<PointerKey>> modCache = new HashMap<>();
+    public Map<CGNode, OrdinalSet<PointerKey>> refCache = new HashMap<>();
+
 
     private WalaSession(AnalysisScope scope, IClassHierarchy cha, AnalysisCache cache,
-                        CallGraph cg, PointerAnalysis pa, ModRef modRef,
-                        Map<CGNode, OrdinalSet<PointerKey>> mod, Map<CGNode, OrdinalSet<PointerKey>> ref) {
+                        CallGraph cg, PointerAnalysis pa, ModRef modRef) {
         this.scope = scope; this.cha = cha; this.cache = cache;
         this.cg = cg; this.pa = pa;
-        this.modRef = modRef; this.mod = mod; this.ref = ref;
+        this.modRef = modRef;
     }
 
     /** 루트(classpath root)로 세션을 1회 초기화 */
     public static WalaSession init(String classpathRoot) throws Exception {
+
+
         AnalysisScope scope = AnalysisScope.createJavaAnalysisScope();
+        // 1) 제외 설정(Exclusions) 파일 로드 (프로젝트 루트에 exclusions.txt 필요)
+        File exclusionsFile = new File("exclusions.txt");
+        if (exclusionsFile.exists()) {
+            try (java.io.InputStream is = new java.io.FileInputStream(exclusionsFile)) {
+                scope.setExclusions(new com.ibm.wala.util.config.FileOfClasses(is));
+            }
+        }
 
         // 1) 분석 대상 클래스패스 추가
         com.ibm.wala.core.util.config.AnalysisScopeReader.instance
@@ -59,11 +69,9 @@ public class WalaSession {
         PointerAnalysis<InstanceKey> pa = builder.getPointerAnalysis();
 
         // 4) ModRef 전역 계산 초기화
-        ModRef modRef = ModRef.make();
-        Map<CGNode, OrdinalSet<PointerKey>> mod = modRef.computeMod(cg, pa);
-        Map<CGNode, OrdinalSet<PointerKey>> ref = modRef.computeRef(cg, pa);
+        ModRef<InstanceKey> modRef = ModRef.make();
 
-        return new WalaSession(scope, cha, cache, cg, pa, modRef, mod, ref);
+        return new WalaSession(scope, cha, cache, cg, pa, modRef);
     }
 
     private static void addPrimordialJars(AnalysisScope scope) throws Exception {

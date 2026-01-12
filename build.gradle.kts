@@ -26,3 +26,7 @@ application {
     // Main 클래스 경로를 프로젝트에 맞게 조정
     mainClass.set("org.example.Main")
 }
+
+tasks.withType<JavaExec> {
+    standardInput = System.`in`
+}
