@@ -6,6 +6,11 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Main {
+
+    // 분석 옵션 리스트
+    private static final Set<String> VALID_DDG_OPTIONS = Set.of("DDG", "NO_DDG");
+    private static final Set<String> VALID_DFG_MODES = Set.of("DATA_STACK", "DATA_LOCAL", "WALA_ONLY");
+
     public static void main(String[] args) throws Exception {
 
         if (args.length < 1) {
@@ -13,8 +18,23 @@ public class Main {
             System.exit(1);
         }
 
-        String mode = (args.length > 1) ? args[1].toUpperCase() : "SEMANTIC";
-        boolean skipDDG = (args.length > 2) && "NO_DDG".equalsIgnoreCase(args[2]);
+        // 1. DFG 옵션 검증
+        String mode = (args.length > 1) ? args[1].toUpperCase() : "DATA_LOCAL";
+        if (!VALID_DFG_MODES.contains(mode)) {
+            System.err.println("[ERROR] Invalid DFG Mode: " + mode);
+            printUsage();
+            System.exit(1);
+        }
+
+        // 2. DDG 옵션 검증
+        String ddgOption = (args.length > 2) ? args[2].toUpperCase() : "DDG";
+        if (!VALID_DDG_OPTIONS.contains(ddgOption)) {
+            System.err.println("[ERROR] Invalid DDG Option: " + ddgOption);
+            printUsage();
+            System.exit(1);
+        }
+
+        System.out.println(">>> DFG Mode: " + mode + " | DDG Option: " + ddgOption);
 
         Path inputPath = Paths.get(args[0]).toAbsolutePath();
         String appClassPath = Files.isDirectory(inputPath) ? inputPath.toString() : inputPath.getParent().toString();
@@ -52,9 +72,8 @@ public class Main {
             }
 
             int successCount = 0;
-            int failCount = 0;
-            List<String> failedFiles = new ArrayList<>();
             long startTime = System.currentTimeMillis();
+            Map<String, String> failedMap = new LinkedHashMap<>();
 
             for (Path classFile : filesToProcess) {
                 String fileName = classFile.getFileName().toString();
@@ -63,7 +82,7 @@ public class Main {
 
                     for (var ms : scan.methods) {
                         BcelBytecodeCFG.Graph instrCFG = bcel.build(classFile.toString(), ms.name, ms.desc, mode);
-                        WalaIRProjector.Flow flow = projector.analyze(session, scan.internalName, ms.name, ms.desc, instrCFG, skipDDG);
+                        WalaIRProjector.Flow flow = projector.analyze(session, scan.internalName, ms.name, ms.desc, instrCFG, ddgOption);
 
                         Path outDir = Paths.get("out");
                         Files.createDirectories(outDir);
@@ -75,32 +94,42 @@ public class Main {
                     System.out.println("[SUCCESS] " + fileName);
                     successCount++;
 
-                } catch (Exception ex) {
-                    // 개별 파일 분석 실패 시 출력
-                    System.err.println("[FAILED] " + fileName);
-                    System.err.println("  - Error Type: " + ex.getClass().getSimpleName());
-                    System.err.println("  - Message: " + ex.getMessage());
-
-                    // 의존성 문제인 경우 원인 추적을 위해 StackTrace 일부 출력 (선택 사항)
-                    if (ex.getMessage() != null && ex.getMessage().contains("Class not found")) {
-                        System.err.println("  - Hint: Check if this class depends on missing external JARs (like Swing/AWT).");
-                    }
-                    failedFiles.add(fileName + " (" + ex.getMessage() + ")");
-                    failCount++;
+                } catch (Exception ex) { // class 분석 실패
+                    failedMap.put(fileName, ex.getMessage());
                 }
             }
 
             // 최종 요약 보고
             long duration = System.currentTimeMillis() - startTime;
             System.out.println("\n--- Analysis Summary ---");
-            System.out.printf("Total Files: %d | Success: %d | Failure: %d\n", (successCount + failCount), successCount, failCount);
             System.out.printf("Total Time: %.2fs\n", duration / 1000.0);
+            System.out.printf(" >> Total Files   : %d\n", (successCount + failedMap.size()));
+            System.out.printf(" >> Success       : %d\n", successCount);
+            System.out.printf(" >> Failure       : %d\n", failedMap.size());
 
-            if (!failedFiles.isEmpty()) {
-                System.out.println("Failed List:");
-                failedFiles.forEach(f -> System.out.println("  - " + f));
+            if (!failedMap.isEmpty()) {
+                System.out.println();
+                System.out.println(" [Detailed Failure Reasons]");
+                // System.err 대신 System.out을 사용하여 순서를 보장합니다.
+                failedMap.forEach((name, reason) -> {
+                    String hint = reason.contains("Class not found") ?
+                            " -> [HIERARCHY ISSUE] Check exclusions.txt" : "";
+                    System.out.println(String.format(" - %-25s : %s%s", name, reason, hint));
+                });
             }
             System.out.println("------------------------");
+            System.out.flush();
         }
+    }
+
+    private static void printUsage() {
+        System.err.println("Usage: java -jar bytegraph.jar <appClassPath> [dfgMode] [ddgOption]");
+        System.err.println("\n[DFG Modes (Physical/BCEL)]");
+        System.err.println("  - DATA_LOCAL : (Default) Track local variable slots only");
+        System.err.println("  - DATA_STACK : Track both slots and stack operations (Rich physical flow)");
+        System.err.println("  - WALA_ONLY  : Skip physical flow; use high-level WALA analysis results only");
+        System.err.println("\n[DDG Options (High-level/WALA)]");
+        System.err.println("  - DDG        : (Default) Full data dependence ");
+        System.err.println("  - NO_DDG     : Skip WALA PDG analysis entirely");
     }
 }

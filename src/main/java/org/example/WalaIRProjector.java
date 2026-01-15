@@ -38,12 +38,15 @@ public class WalaIRProjector {
 
     /** main entry: orchestrates all steps */
     public Flow analyze(WalaSession session, String internalClassName, String methodName, String methodDesc,
-                        BcelBytecodeCFG.Graph instrCFG, boolean skipDDG) throws Exception {
+                        BcelBytecodeCFG.Graph instrCFG, String ddgOption) throws Exception {
 
         // 1) Target 메서드 찾기 (session 활용)
         String walaInternal = "L" + internalClassName;
         IClass clazz = session.cha.lookupClass(TypeReference.findOrCreate(com.ibm.wala.types.ClassLoaderReference.Application, walaInternal));
-        if (clazz == null) throw new IllegalArgumentException("Class not found: " + walaInternal);
+        if (clazz == null) {
+            throw new IllegalArgumentException("Class not found: " + walaInternal +
+                    " (Possible cause: Parent class like JFrame is blocked in exclusions.txt)");
+        }
 
         IMethod targetMethod = null;
         for (IMethod m : clazz.getDeclaredMethods()) {
@@ -66,7 +69,7 @@ public class WalaIRProjector {
         buildDFG(ir, irIndexToOffset, flow);
         buildCDG(ir, ir.getControlFlowGraph(), irIndexToOffset, flow);
 
-        if (!skipDDG) {
+        if (!"NO_DDG".equals(ddgOption)) {
             buildDDG(session, targetMethod, ir, irIndexToOffset, flow);
         }
 
@@ -83,13 +86,21 @@ public class WalaIRProjector {
     private void buildDFG(IR ir, Map<Integer, Integer> mapping, Flow flow) {
         DefUse du = new DefUse(ir);
         SSAInstruction[] ins = ir.getInstructions();
+
+        // IR의 모든 명령어를 순회하며 데이터 흐름 추적
         for (int i = 0; i < ins.length; i++) {
             SSAInstruction s = ins[i];
             if (s == null) continue;
+
+            // use
             Integer useOff = mapping.get(i);
             if (useOff == null) continue;
+
+            // def
             for (int j = 0; j < s.getNumberOfUses(); j++) {
                 SSAInstruction def = du.getDef(s.getUse(j));
+
+                // edge 만들기
                 if (def != null) {
                     Integer defOff = mapping.get(def.iIndex());
                     if (defOff != null) flow.dfg.get(defOff).add(useOff);
@@ -114,7 +125,6 @@ public class WalaIRProjector {
 
         // 2. 현재 노드에 대한 Mod/Ref 계산
         if (session.modCache == null || session.modCache.isEmpty()) {
-            System.out.println(">>> Computing Global ModRef Map (First time only)...");
             session.modCache = session.modRef.computeMod(session.cg, session.pa);
             session.refCache = session.modRef.computeRef(session.cg, session.pa);
         }
@@ -125,13 +135,20 @@ public class WalaIRProjector {
                 Slicer.DataDependenceOptions.FULL, Slicer.ControlDependenceOptions.NONE,
                 null, session.cg, session.modRef);
 
+        // 4. edge mapping
+        // 1) 캐시 생성
+        Map<Statement, Integer> stmtCache = new HashMap<>();
+
         for (Statement s : pdg) {
+            // 2) 출발지 오프셋 미리 계산 및 유효성 검사
+            Integer srcOff = stmtCache.computeIfAbsent(s, k -> statementToOffset(k, irIndexToOffset));
+            if (srcOff == null) continue;
             Iterator<Statement> succ = pdg.getSuccNodes(s);
             while (succ.hasNext()) {
                 Statement t = succ.next();
-                Integer srcOff = statementToOffset(s, irIndexToOffset);
-                Integer dstOff = statementToOffset(t, irIndexToOffset);
-                if (srcOff != null && dstOff != null) {
+                // 3) 목적지 오프셋 캐시 활용
+                Integer dstOff = stmtCache.computeIfAbsent(t, k -> statementToOffset(k, irIndexToOffset));
+                if (dstOff != null) {
                     flow.ddg.computeIfAbsent(srcOff, k -> new LinkedHashSet<>()).add(dstOff);
                 }
             }
@@ -143,111 +160,36 @@ public class WalaIRProjector {
      *  method name kept short: computeCDG(...)
      * ========================= */
 
-    private void buildCDG(IR ir,
-                          SSACFG ssaCfg,
-                          Map<Integer, Integer> irIndexToOffset,
-                          Flow flow) {
+    private void buildCDG(IR ir, SSACFG ssaCfg, Map<Integer, Integer> irIndexToOffset, Flow flow) {
+        // 1. Post-Dominator 계산: CFG와 Exit 블록을 넘겨 역방향 도미네이터 계산
+        com.ibm.wala.util.graph.dominators.Dominators<ISSABasicBlock> postdoms =
+                com.ibm.wala.util.graph.dominators.Dominators.make(ssaCfg, ssaCfg.exit());
 
-        // collect blocks + index
-        List<ISSABasicBlock> blocks = new ArrayList<>();
-        for (ISSABasicBlock bb : ssaCfg) blocks.add(bb);
-        Map<ISSABasicBlock, Integer> idxOf = new HashMap<>();
-        for (int i = 0; i < blocks.size(); i++) idxOf.put(blocks.get(i), i);
-
-        ISSABasicBlock exit = ssaCfg.exit();
-        int exitIdx = idxOf.get(exit);
-
-        // init postdom sets
-        List<BitSet> postdom = new ArrayList<>(blocks.size());
-        for (int i = 0; i < blocks.size(); i++) {
-            BitSet bs = new BitSet(blocks.size());
-            bs.set(0, blocks.size());
-            postdom.add(bs);
-        }
-        BitSet exitSet = new BitSet(blocks.size());
-        exitSet.set(exitIdx);
-        postdom.set(exitIdx, exitSet);
-
-        // fixed-point: postdom(n) = {n} ∪ (∩ succ(n))
-        boolean changed;
-        do {
-            changed = false;
-            for (ISSABasicBlock n : blocks) {
-                int nIdx = idxOf.get(n);
-                List<ISSABasicBlock> succs = new ArrayList<>();
-                for (Iterator<ISSABasicBlock> it = ssaCfg.getSuccNodes(n); it.hasNext();) succs.add(it.next());
-                succs.addAll(ssaCfg.getExceptionalSuccessors(n));
-
-                BitSet inter;
-                if (!succs.isEmpty()) {
-                    inter = (BitSet) postdom.get(idxOf.get(succs.get(0))).clone();
-                    for (int i = 1; i < succs.size(); i++) {
-                        inter.and(postdom.get(idxOf.get(succs.get(i))));
-                    }
-                } else {
-                    inter = (BitSet) postdom.get(exitIdx).clone();
-                }
-                BitSet newSet = (BitSet) inter.clone();
-                newSet.set(nIdx);
-
-                BitSet oldSet = postdom.get(nIdx);
-                if (!newSet.equals(oldSet)) {
-                    postdom.set(nIdx, newSet);
-                    changed = true;
-                }
-            }
-        } while (changed);
-
-        // control sites: conditional OR switch OR has exceptional successor
-        for (ISSABasicBlock x : blocks) {
-            int xIdx = idxOf.get(x);
+        // 2. CFG 내 모든 블록을 순회하며 제어 분기점(Control Site) 탐색
+        for (ISSABasicBlock x : ssaCfg) {
             int xLastIdx = x.getLastInstructionIndex();
-            Integer xSrcOff = (xLastIdx >= 0) ? irIndexToOffset.get(xLastIdx) : null;
+            if (xLastIdx < 0) continue;
+            Integer xSrcOff = irIndexToOffset.get(xLastIdx);
+            if (xSrcOff == null) continue;
 
-            boolean isConditional =
-                    (xLastIdx >= 0) && (ir.getInstructions()[xLastIdx] instanceof SSAConditionalBranchInstruction);
-            boolean isSwitch =
-                    (xLastIdx >= 0) && (ir.getInstructions()[xLastIdx] instanceof SSASwitchInstruction);
-            boolean hasExceptionalSucc = !ssaCfg.getExceptionalSuccessors(x).isEmpty();
+            // 3. 분기점 X의 각 후속 노드 V에 대하여 의존성 전파
+            for (Iterator<ISSABasicBlock> it = ssaCfg.getSuccNodes(x); it.hasNext();) {
+                ISSABasicBlock v = it.next();
 
-            if (!(isConditional || isSwitch || hasExceptionalSucc)) continue;
-
-            // successors of X
-            List<ISSABasicBlock> succs = new ArrayList<>();
-            for (Iterator<ISSABasicBlock> it = ssaCfg.getSuccNodes(x); it.hasNext();) succs.add(it.next());
-            succs.addAll(ssaCfg.getExceptionalSuccessors(x));
-
-            for (ISSABasicBlock v : succs) {
-                int vIdx = idxOf.get(v);
-                BitSet postV = postdom.get(vIdx);
-
-                for (ISSABasicBlock y : blocks) {
-                    int yIdx = idxOf.get(y);
-                    if (!postV.get(yIdx)) continue;            // Y not in postdom(V)
-                    if (postdom.get(xIdx).get(yIdx)) continue; // Y postdominates X -> exclude
-
-                    // project Y to ALL offsets in its block (richer CDP visualization)
-                    List<Integer> yOffsets = new ArrayList<>();
-                    int yFirst = y.getFirstInstructionIndex();
-                    int yLast  = y.getLastInstructionIndex();
-                    if (yFirst >= 0 && yLast >= yFirst) {
-                        for (int i = yFirst; i <= yLast; i++) {
-                            Integer off = irIndexToOffset.get(i);
-                            if (off != null) yOffsets.add(off);
-                        }
-                    }
-
-                    if (xSrcOff != null) {
-                        for (Integer yDstOff : yOffsets) {
-                            flow.cdg.computeIfAbsent(xSrcOff, k -> new LinkedHashSet<>()).add(yDstOff);
+                // 4. Y가 V의 도미네이터이지만 X의 도미네이터는 아닌 블록들 탐색
+                for (ISSABasicBlock y : ssaCfg) {
+                    if (postdoms.isDominatedBy(v, y) && !postdoms.isDominatedBy(x, y)) {
+                        for (int i = y.getFirstInstructionIndex(); i <= y.getLastInstructionIndex(); i++) {
+                            Integer yDstOff = irIndexToOffset.get(i);
+                            if (yDstOff != null) {
+                                flow.cdg.computeIfAbsent(xSrcOff, k -> new LinkedHashSet<>()).add(yDstOff);
+                            }
                         }
                     }
                 }
             }
         }
     }
-
-
 
     /** init flow maps for all known offsets from BCEL graph */
     private void initFlow(BcelBytecodeCFG.Graph g, Flow f) {

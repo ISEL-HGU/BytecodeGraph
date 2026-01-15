@@ -54,10 +54,9 @@ public class BcelBytecodeCFG {
         }
 
         // 2) 물리적 DFG 추출: 로컬 변수 슬롯 추적 (간이 Reaching Definitions)
-        if (mode.equals("SEMANTIC") || mode.equals("DETAILED")) {
+        if (mode.equals("DATA_LOCAL") || mode.equals("DATA_STACK")) {
             Map<Integer, Integer> lastWriteToSlot = new HashMap<>(); // slotIndex -> offset
             // 간단한 스택 시뮬레이션 (Stack-based DFG)
-            Stack<Integer> producerStack = new Stack<>();
 
             for (InstructionHandle ih : ihs) {
                 Instruction inst = ih.getInstruction();
@@ -74,7 +73,7 @@ public class BcelBytecodeCFG {
         }
 
         // 스택 기반 추적: 값을 생산하는 명령어와 소비하는 명령어 연결
-        if (mode.equals("DETAILED")) {
+        if (mode.equals("DATA_STACK")) {
             Stack<Integer> producerStack = new Stack<>();
             for (InstructionHandle ih : ihs) {
                 Instruction inst = ih.getInstruction();
