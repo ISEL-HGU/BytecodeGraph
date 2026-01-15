@@ -6,11 +6,9 @@ import com.ibm.wala.classLoader.IClass;
 import com.ibm.wala.classLoader.IMethod;
 import com.ibm.wala.ipa.callgraph.*;
 import com.ibm.wala.ipa.callgraph.propagation.InstanceKey;
-import com.ibm.wala.ipa.callgraph.propagation.PointerKey;
 import com.ibm.wala.ipa.slicer.*;
 import com.ibm.wala.ssa.*;
 import com.ibm.wala.types.TypeReference;
-import com.ibm.wala.util.intset.OrdinalSet;
 
 import java.util.*;
 
@@ -40,7 +38,7 @@ public class WalaIRProjector {
 
     /** main entry: orchestrates all steps */
     public Flow analyze(WalaSession session, String internalClassName, String methodName, String methodDesc,
-                        BcelBytecodeCFG.Graph instrCFG) throws Exception {
+                        BcelBytecodeCFG.Graph instrCFG, boolean skipDDG) throws Exception {
 
         // 1) Target 메서드 찾기 (session 활용)
         String walaInternal = "L" + internalClassName;
@@ -59,17 +57,18 @@ public class WalaIRProjector {
         IR ir = session.cache.getIRFactory().makeIR(targetMethod, com.ibm.wala.ipa.callgraph.impl.Everywhere.EVERYWHERE, SSAOptions.defaultOptions());
         Flow flow = new Flow();
         initFlow(instrCFG, flow);
-        System.out.println("analyze start");
+
         // BCEL에서 추출된 물리적 DFG 엣지들을 최종 결과에 병합
         instrCFG.dfgEdges.forEach((src, dsts) -> flow.dfg.get(src).addAll(dsts));
 
         // 3) DFG/DDG/CDG 생성
         Map<Integer, Integer> irIndexToOffset = buildIRIndexToOffset(ir);
         buildDFG(ir, irIndexToOffset, flow);
-
-        buildDDG(session, targetMethod, ir, irIndexToOffset, flow);
-
         buildCDG(ir, ir.getControlFlowGraph(), irIndexToOffset, flow);
+
+        if (!skipDDG) {
+            buildDDG(session, targetMethod, ir, irIndexToOffset, flow);
+        }
 
         flow.dfg.forEach((src, dsts) -> {
             flow.ddg.computeIfAbsent(src, k -> new LinkedHashSet<>()).addAll(dsts);
@@ -120,12 +119,10 @@ public class WalaIRProjector {
             session.refCache = session.modRef.computeRef(session.cg, session.pa);
         }
 
-        // 4. PDG 생성
+        // 3. PDG 생성
         PDG<InstanceKey> pdg = new PDG<>(node, session.pa,
-                session.modCache,
-                session.refCache,
-                Slicer.DataDependenceOptions.NO_EXCEPTIONS,
-                Slicer.ControlDependenceOptions.NONE,
+                session.modCache, session.refCache,
+                Slicer.DataDependenceOptions.FULL, Slicer.ControlDependenceOptions.NONE,
                 null, session.cg, session.modRef);
 
         for (Statement s : pdg) {
