@@ -8,6 +8,7 @@ import com.ibm.wala.ipa.callgraph.*;
 import com.ibm.wala.ipa.callgraph.propagation.InstanceKey;
 import com.ibm.wala.ipa.slicer.*;
 import com.ibm.wala.ssa.*;
+import com.ibm.wala.types.ClassLoaderReference;
 import com.ibm.wala.types.TypeReference;
 
 import java.util.*;
@@ -40,29 +41,49 @@ public class WalaIRProjector {
     public Flow analyze(WalaSession session, String internalClassName, String methodName, String methodDesc,
                         BcelBytecodeCFG.Graph instrCFG, String ddgOption) throws Exception {
 
-        // 1) Target 메서드 찾기 (session 활용)
+        // 1) Target 메서드 찾기
         String walaInternal = "L" + internalClassName;
         IClass clazz = session.cha.lookupClass(TypeReference.findOrCreate(com.ibm.wala.types.ClassLoaderReference.Application, walaInternal));
+
         if (clazz == null) {
-            throw new IllegalArgumentException("Class not found: " + walaInternal +
-                    " (Possible cause: Parent class like JFrame is blocked in exclusions.txt)");
+            throw new IllegalArgumentException("Class not found: " + walaInternal);
         }
 
         IMethod targetMethod = null;
+        // 1차 시도: 이름과 시그니처가 모두 일치하는지 확인
         for (IMethod m : clazz.getDeclaredMethods()) {
             if (m.getName().toString().equals(methodName) && m.getSignature().contains(methodDesc)) {
-                targetMethod = m; break;
+                targetMethod = m;
+                break;
             }
         }
-        if (targetMethod == null) throw new IllegalArgumentException("Method not found: " + methodName);
+
+        // 2차 시도: 1차에서 실패 시 이름만으로 매칭 (시그니처 미세 불일치 대비)
+        if (targetMethod == null) {
+            for (IMethod m : clazz.getDeclaredMethods()) {
+                if (m.getName().toString().equals(methodName)) {
+                    targetMethod = m;
+                    break;
+                }
+            }
+        }
+
+        if (targetMethod == null) {
+            throw new IllegalArgumentException("Method not found: " + methodName);
+        } else if (targetMethod.isAbstract()) { // interface
+            return null;
+        }
 
         // 2) IR 및 매핑 구축
         IR ir = session.cache.getIRFactory().makeIR(targetMethod, com.ibm.wala.ipa.callgraph.impl.Everywhere.EVERYWHERE, SSAOptions.defaultOptions());
+        if (ir == null) throw new IllegalArgumentException("Cannot generate IR for: " + methodName);
         Flow flow = new Flow();
         initFlow(instrCFG, flow);
 
         // BCEL에서 추출된 물리적 DFG 엣지들을 최종 결과에 병합
-        instrCFG.dfgEdges.forEach((src, dsts) -> flow.dfg.get(src).addAll(dsts));
+        instrCFG.dfgEdges.forEach((src, dsts) -> {
+            flow.dfg.computeIfAbsent(src, k -> new LinkedHashSet<>()).addAll(dsts);
+        });
 
         // 3) DFG/DDG/CDG 생성
         Map<Integer, Integer> irIndexToOffset = buildIRIndexToOffset(ir);
@@ -103,7 +124,9 @@ public class WalaIRProjector {
                 // edge 만들기
                 if (def != null) {
                     Integer defOff = mapping.get(def.iIndex());
-                    if (defOff != null) flow.dfg.get(defOff).add(useOff);
+                    if (defOff != null) {
+                        flow.dfg.computeIfAbsent(defOff, k -> new LinkedHashSet<>()).add(useOff);
+                    }
                 }
             }
         }
@@ -222,6 +245,31 @@ public class WalaIRProjector {
         return null;
     }
 
+    public boolean isInterfaceClass(WalaSession session, String internalClassName) {
+        try {
+            IClass clazz = getClassFromSession(session, internalClassName);
+            return clazz != null && clazz.isInterface();
+        } catch (Exception e) { return false; }
+    }
 
+    public boolean isAbstractMethod(WalaSession session, String internalClassName, String methodName, String methodDesc) {
+        try {
+            IClass clazz = getClassFromSession(session, internalClassName);
+            if (clazz == null) return false;
+
+            for (IMethod m : clazz.getDeclaredMethods()) {
+                // Selector를 이용해 이름과 파라미터 타입이 일치하는지 더 정확히 확인
+                if (m.getName().toString().equals(methodName)) {
+                    return m.isAbstract();
+                }
+            }
+        } catch (Exception e) { return false; }
+        return false;
+    }
+
+    private IClass getClassFromSession(WalaSession session, String internalClassName) {
+        String walaInternal = internalClassName.startsWith("L") ? internalClassName : "L" + internalClassName;
+        return session.cha.lookupClass(TypeReference.findOrCreate(ClassLoaderReference.Application, walaInternal));
+    }
 
 }

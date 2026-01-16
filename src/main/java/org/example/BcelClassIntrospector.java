@@ -22,10 +22,13 @@ public class BcelClassIntrospector {
 
     /** 결과: 내부 클래스 이름 + Code 있는 모든 메서드 */
     public static class ClassScan {
-        public final String internalName;           // 예: "com/example/MyClass"
+        public final String internalName;
+        public final String superName;
         public final List<MethodSig> methods;       // Code 있는 메서드만
-        public ClassScan(String internalName, List<MethodSig> methods) {
-            this.internalName = internalName; this.methods = methods;
+        public ClassScan(String internalName, String superName, List<MethodSig> methods) {
+            this.internalName = internalName;
+            this.superName = superName;
+            this.methods = methods;
         }
     }
 
@@ -33,8 +36,9 @@ public class BcelClassIntrospector {
     public static ClassScan scanClassFile(String classFilePath) throws Exception {
         ClassParser cp = new ClassParser(new FileInputStream(classFilePath), classFilePath);
         JavaClass jc = cp.parse();
-        String dotted = jc.getClassName();                // 예: "com.example.MyClass"
-        String internal = dotted.replace('.', '/');       // 예: "com/example/MyClass"
+        String dotted = jc.getClassName();
+        String internal = dotted.replace('.', '/');
+        String superName = jc.getSuperclassName().replace('.', '/');
 
         List<MethodSig> list = new ArrayList<>();
         for (Method m : jc.getMethods()) {
@@ -42,6 +46,6 @@ public class BcelClassIntrospector {
             if (code == null) continue;                     // abstract/native 제외
             list.add(new MethodSig(m.getName(), m.getSignature()));
         }
-        return new ClassScan(internal, list);
+        return new ClassScan(internal, superName, list);
     }
 }

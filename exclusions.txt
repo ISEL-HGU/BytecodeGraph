@@ -13,3 +13,4 @@ javax\/security\/.*
 javax\/crypto\/.*
 com\/sun\/crypto\/.*
 sun\/security\/.*
+java\/awt\/.*

@@ -14,9 +14,7 @@ import com.ibm.wala.util.MonitorUtil;
 import com.ibm.wala.util.intset.OrdinalSet;
 
 import java.io.File;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 public class WalaSession {
 
@@ -38,32 +36,62 @@ public class WalaSession {
     }
 
     /** 루트(classpath root)로 세션을 1회 초기화 */
-    public static WalaSession init(String classpathRoot) throws Exception {
+    public static WalaSession init(String classpathRoot, Set<String> unblockPatterns, List<String> extraLibPaths) throws Exception {
         AnalysisScope scope = AnalysisScope.createJavaAnalysisScope();
 
-        // 1) 제외 설정(Exclusions) 파일 로드 및 패턴 추출 (진단용)
+        // 1) 동적 Exclusions 설정 (파일 수정 없이 메모리에서 처리)
         File exclusionsFile = new File("exclusions.txt");
-        java.util.Set<String> exclusionPatterns = new java.util.HashSet<>();
         if (exclusionsFile.exists()) {
-            // 파일을 읽어 실제 적용된 패턴들을 수집합니다.
+            List<String> filteredLines = new ArrayList<>();
             try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(exclusionsFile))) {
                 String line;
                 while ((line = br.readLine()) != null) {
-                    line = line.trim();
-                    if (!line.startsWith("#") && !line.isEmpty()) {
-                        exclusionPatterns.add(line);
+                    String trimmed = line.trim();
+                    if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                        filteredLines.add(line);
+                        continue;
+                    }
+
+                    // unblockPatterns에 포함된 패키지라면 주석 처리된 것처럼 무시
+                    boolean shouldUnblock = unblockPatterns.stream().anyMatch(trimmed::contains);
+                    if (shouldUnblock) {
+                        filteredLines.add("# " + line + " // Dynamically unblocked");
+                    } else {
+                        filteredLines.add(line);
                     }
                 }
             }
-            try (java.io.InputStream is = new java.io.FileInputStream(exclusionsFile)) {
-                scope.setExclusions(new com.ibm.wala.util.config.FileOfClasses(is));
-            }
+
+            // 메모리 상의 데이터를 기반으로 Exclusions 설정
+            String combined = String.join("\n", filteredLines);
+            scope.setExclusions(new com.ibm.wala.util.config.FileOfClasses(
+                    new java.io.ByteArrayInputStream(combined.getBytes(java.nio.charset.StandardCharsets.UTF_8))));
         }
 
-        // 2) 분석 대상 클래스패스 및 JDK 라이브러리 추가
+        // 2) 기본 클래스패스 및 JDK 추가
         com.ibm.wala.core.util.config.AnalysisScopeReader.instance
                 .addClassPathToScope(classpathRoot, scope, ClassLoaderReference.Application);
         addPrimordialJars(scope);
+
+        // 3) 외부 라이브러리(JavaFX 등) 동적 추가
+        if (extraLibPaths != null) {
+            for (String libPath : extraLibPaths) {
+                File libFile = new File(libPath);
+                if (libFile.exists()) {
+                    if (libFile.isDirectory()) {
+                        // 디렉토리 내 모든 jar 추가
+                        File[] jars = libFile.listFiles((dir, name) -> name.endsWith(".jar"));
+                        if (jars != null) {
+                            for (File jar : jars) {
+                                scope.addToScope(ClassLoaderReference.Extension, new java.util.jar.JarFile(jar));
+                            }
+                        }
+                    } else if (libPath.endsWith(".jar")) {
+                        scope.addToScope(ClassLoaderReference.Extension, new java.util.jar.JarFile(libFile));
+                    }
+                }
+            }
+        }
 
         // 3) 핵심 분석 인프라 생성 (실패 시 진단 로직 작동)
         IClassHierarchy cha;
@@ -71,7 +99,6 @@ public class WalaSession {
             cha = com.ibm.wala.ipa.cha.ClassHierarchyFactory.make(scope);
         } catch (Exception e) {
             // Exception e를 추가로 인자로 넘김
-            diagnoseFailure(classpathRoot, exclusionPatterns, e);
             throw e;
         }
 
@@ -112,46 +139,4 @@ public class WalaSession {
         if (!hasJce) throw new IllegalStateException("jce.jar not found");
     }
 
-    /**
-     * Diagnoses the cause of initialization failure and provides an English report.
-     */
-    public static void diagnoseFailure(String path, Set<String> exclusions, Exception e) {
-        System.err.println("\n[!] Analysis Diagnosis Report");
-        System.err.println("--------------------------------------------------");
-
-        String errorMsg = e.getMessage() != null ? e.getMessage() : "";
-        String missingClass = "";
-
-        // WALA의 클래스 표기법(Lpackage/Class)에서 클래스명 추출
-        if (errorMsg.contains("L")) {
-            int start = errorMsg.indexOf("L");
-            int end = errorMsg.indexOf(" ", start);
-            missingClass = (end == -1) ? errorMsg.substring(start) : errorMsg.substring(start, end);
-            missingClass = missingClass.replace("/", ".");
-        }
-
-        System.err.println("▶ Exception: " + e.getClass().getSimpleName());
-        System.err.println("▶ Message: " + errorMsg);
-
-        boolean isExcluded = false;
-        if (!missingClass.isEmpty()) {
-            String finalPath = missingClass.replace(".", "/");
-            for (String pattern : exclusions) {
-                if (finalPath.matches(pattern.replace("\\/", "/"))) {
-                    isExcluded = true;
-                    System.err.println("▶ Diagnosis: [Blocked by Exclusion Settings]");
-                    System.err.println("   The class '" + missingClass + "' or its parent is restricted.");
-                    System.err.println("   Rule: " + pattern);
-                    System.err.println("   Solution: Comment out (#) this rule in exclusions.txt.");
-                    break;
-                }
-            }
-        }
-
-        if (!isExcluded) {
-            System.err.println("▶ Diagnosis: [Missing Dependency or Classpath Issue]");
-            System.err.println("   Solution: Check if the JAR containing '" + missingClass + "' is in: " + path);
-        }
-        System.err.println("--------------------------------------------------\n");
-    }
 }
